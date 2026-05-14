@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { localizeMedicalSummary } from "@/lib/ai-features";
+import { getEducationalDisclaimer, resolveLanguage } from "@/lib/languages";
 import {
     lookupTrustedMedicalInfo,
     summarizeTrustedMedicalInfo,
@@ -7,6 +9,7 @@ import {
 export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const query = searchParams.get("query")?.trim();
+    const language = resolveLanguage(searchParams.get("language"));
 
     if (!query) {
         return NextResponse.json(
@@ -17,13 +20,17 @@ export async function GET(req: Request) {
 
     try {
         const results = await lookupTrustedMedicalInfo(query);
-        const summary = await summarizeTrustedMedicalInfo(query, results);
+        const summary = await summarizeTrustedMedicalInfo(query, results, language);
+        let localizedSummary = summary;
+
+        if (summary) {
+            localizedSummary = await localizeMedicalSummary(query, summary, language);
+        }
 
         return NextResponse.json({
             results,
-            summary,
-            disclaimer:
-                "This information is educational and not a medical diagnosis.",
+            summary: localizedSummary,
+            disclaimer: getEducationalDisclaimer(language),
         });
     } catch (error) {
         console.error("Medical search error:", error);

@@ -49,16 +49,25 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
+import {
+    getAssistantIntro,
+    LANGUAGE_LABELS,
+    resolveLanguage,
+    type AppLanguage,
+} from "@/lib/languages";
 import { type AppRole, loadUserRole, normalizeAppRole } from "@/lib/auth";
 import { departments } from "@/lib/departments";
 import { supabaseClient } from "@/lib/supabase-client";
 import type {
+    AdminInsightCard,
     Appointment,
+    AppointmentAssignmentDefaults,
     ChatLog,
     EmergencyRequest,
     MedicalSearchItem,
+    QueuePrediction,
 } from "@/types";
-import type { User } from "@supabase/supabase-js";
+import type { AuthChangeEvent, User } from "@supabase/supabase-js";
 
 type DashboardTab = "patient" | "portal" | "doctor" | "admin" | "architecture";
 type PublicSection = "home" | "assistant" | "appointments" | "emergency";
@@ -335,6 +344,14 @@ function buildAiPatientSummary(item: Appointment) {
     return `AI-organised summary: ${symptomText} Requested department: ${item.department}. Current urgency: ${item.urgency}. Current status: ${item.status}.`;
 }
 
+function getStoredLanguage() {
+    if (typeof window === "undefined") {
+        return "en" as AppLanguage;
+    }
+
+    return resolveLanguage(window.localStorage.getItem("suwa-language"));
+}
+
 function getStatusTone(status: Appointment["status"]) {
     if (status === "Approved") {
         return "bg-emerald-100 text-emerald-700";
@@ -391,10 +408,13 @@ export default function SuwaSethaHealthcareAssistant() {
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [emergencyDialogOpen, setEmergencyDialogOpen] = useState(false);
     const [symptomText, setSymptomText] = useState("");
+    const [selectedLanguage, setSelectedLanguage] = useState<AppLanguage>(() =>
+        getStoredLanguage()
+    );
     const [messages, setMessages] = useState<Message[]>([
         {
             role: "assistant",
-            text: "Hello, I am Suwa Assist. I can provide general health information, help you book appointments, and guide you to the right department. I cannot provide a medical diagnosis.",
+            text: getAssistantIntro(getStoredLanguage()),
         },
     ]);
     const [recommendation, setRecommendation] = useState<{
@@ -446,12 +466,27 @@ export default function SuwaSethaHealthcareAssistant() {
     const [medicalResults, setMedicalResults] = useState<MedicalSearchItem[]>([]);
     const [medicalSummary, setMedicalSummary] = useState("");
     const [medicalDisclaimer, setMedicalDisclaimer] = useState("");
+    const [patientQueuePredictions, setPatientQueuePredictions] = useState<
+        Record<string, QueuePrediction>
+    >({});
+    const [staffQueuePredictions, setStaffQueuePredictions] = useState<
+        Record<string, QueuePrediction>
+    >({});
+    const [summaryGeneratingId, setSummaryGeneratingId] = useState<string | null>(
+        null
+    );
+    const [adminInsights, setAdminInsights] = useState<AdminInsightCard[]>([]);
+    const [adminInsightsLoading, setAdminInsightsLoading] = useState(false);
+    const [adminInsightsError, setAdminInsightsError] = useState("");
     const [doctorStatusFilter, setDoctorStatusFilter] = useState("All");
     const [doctorUrgencyFilter, setDoctorUrgencyFilter] = useState("All");
     const [doctorDepartmentFilter, setDoctorDepartmentFilter] = useState("All");
     const [selectedAdminAppointment, setSelectedAdminAppointment] =
         useState<Appointment | null>(null);
     const [adminDialogOpen, setAdminDialogOpen] = useState(false);
+    const [assignmentDefaultsLoading, setAssignmentDefaultsLoading] =
+        useState(false);
+    const [assignmentDefaultsError, setAssignmentDefaultsError] = useState("");
     const [adminAssignmentForm, setAdminAssignmentForm] = useState({
         status: "Approved",
         appointmentNumber: "",
@@ -471,6 +506,26 @@ export default function SuwaSethaHealthcareAssistant() {
         phone: "",
         notes: "",
     });
+
+    const applyAssignmentDefaults = React.useEffectEvent(
+        (defaults: AppointmentAssignmentDefaults) => {
+            setAdminAssignmentForm((current) => ({
+                ...current,
+                assignedDoctor:
+                    current.assignedDoctor || defaults.assignedDoctor,
+                roomNumber: current.roomNumber || defaults.roomNumber,
+                appointmentNumber:
+                    current.appointmentNumber || defaults.appointmentNumber,
+                queueNumber:
+                    current.queueNumber || String(defaults.queueNumber),
+                currentQueueNumber:
+                    current.currentQueueNumber ||
+                    String(defaults.currentQueueNumber),
+                appointmentTime:
+                    current.appointmentTime || defaults.appointmentTime,
+            }));
+        }
+    );
 
     const isAuthenticated = currentUser !== null;
     const isPatient = currentRole === "patient";
@@ -664,6 +719,12 @@ export default function SuwaSethaHealthcareAssistant() {
     });
 
     useEffect(() => {
+        if (typeof window !== "undefined") {
+            window.localStorage.setItem("suwa-language", selectedLanguage);
+        }
+    }, [selectedLanguage]);
+
+    useEffect(() => {
         let isActive = true;
 
         const runSync = async () => {
@@ -675,7 +736,7 @@ export default function SuwaSethaHealthcareAssistant() {
 
         const {
             data: { subscription },
-        } = supabaseClient.auth.onAuthStateChange((event) => {
+        } = supabaseClient.auth.onAuthStateChange((event: AuthChangeEvent) => {
             if (!isActive) {
                 return;
             }
@@ -693,7 +754,6 @@ export default function SuwaSethaHealthcareAssistant() {
             isActive = false;
             subscription.unsubscribe();
         };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
@@ -921,6 +981,156 @@ export default function SuwaSethaHealthcareAssistant() {
         };
     }, [authChecked, canViewStaffData]);
 
+    useEffect(() => {
+        let isActive = true;
+
+        const loadPatientQueuePredictions = async () => {
+            if (!patientAppointments.length) {
+                if (isActive) {
+                    setPatientQueuePredictions({});
+                }
+                return;
+            }
+
+            try {
+                const res = await fetch("/api/queue-prediction", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        language: selectedLanguage,
+                        appointments: patientAppointments.map((item) => ({
+                            id: item.id,
+                            appointment_date: item.appointment_date,
+                            appointment_time: item.appointment_time ?? null,
+                            queue_number: item.queue_number ?? null,
+                            current_queue_number: item.current_queue_number ?? null,
+                            department: item.department,
+                            status: item.status,
+                        })),
+                    }),
+                });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || "Failed to load queue prediction.");
+                }
+
+                if (isActive) {
+                    setPatientQueuePredictions(data.predictions ?? {});
+                }
+            } catch {
+                if (isActive) {
+                    setPatientQueuePredictions({});
+                }
+            }
+        };
+
+        void loadPatientQueuePredictions();
+
+        return () => {
+            isActive = false;
+        };
+    }, [patientAppointments, selectedLanguage]);
+
+    useEffect(() => {
+        let isActive = true;
+
+        const loadStaffQueuePredictions = async () => {
+            if (!appointments.length) {
+                if (isActive) {
+                    setStaffQueuePredictions({});
+                }
+                return;
+            }
+
+            try {
+                const res = await fetch("/api/queue-prediction", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        language: selectedLanguage,
+                        appointments: appointments.map((item) => ({
+                            id: item.id,
+                            appointment_date: item.appointment_date,
+                            appointment_time: item.appointment_time ?? null,
+                            queue_number: item.queue_number ?? null,
+                            current_queue_number: item.current_queue_number ?? null,
+                            department: item.department,
+                            status: item.status,
+                        })),
+                    }),
+                });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || "Failed to load queue prediction.");
+                }
+
+                if (isActive) {
+                    setStaffQueuePredictions(data.predictions ?? {});
+                }
+            } catch {
+                if (isActive) {
+                    setStaffQueuePredictions({});
+                }
+            }
+        };
+
+        void loadStaffQueuePredictions();
+
+        return () => {
+            isActive = false;
+        };
+    }, [appointments, selectedLanguage]);
+
+    const loadAdminInsights = React.useEffectEvent(async () => {
+        if (!isAdmin) {
+            setAdminInsights([]);
+            setAdminInsightsError("");
+            return;
+        }
+
+        setAdminInsightsLoading(true);
+        setAdminInsightsError("");
+
+        try {
+            const res = await fetch("/api/admin-insights", {
+                credentials: "include",
+                cache: "no-store",
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                throw new Error(data.error || "Failed to load admin insights.");
+            }
+
+            setAdminInsights(data.cards ?? []);
+        } catch (error) {
+            setAdminInsights([]);
+            setAdminInsightsError(
+                error instanceof Error
+                    ? error.message
+                    : "Failed to load admin insights."
+            );
+        } finally {
+            setAdminInsightsLoading(false);
+        }
+    });
+
+    useEffect(() => {
+        if (!authChecked || !isAdmin) {
+            return;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            void loadAdminInsights();
+        }, 0);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [authChecked, isAdmin]);
+
     const analytics = useMemo(
         () => ({
             pending: appointments.filter((item) => item.status === "Pending").length,
@@ -971,6 +1181,26 @@ export default function SuwaSethaHealthcareAssistant() {
         ]
     );
 
+    const handleLanguageChange = (language: AppLanguage) => {
+        setSelectedLanguage(language);
+        setMessages((current) => {
+            if (
+                current.length === 1 &&
+                current[0]?.role === "assistant" &&
+                !current[0]?.context
+            ) {
+                return [
+                    {
+                        role: "assistant",
+                        text: getAssistantIntro(language),
+                    },
+                ];
+            }
+
+            return current;
+        });
+    };
+
     const handleSymptomSubmit = async () => {
         if (!symptomText.trim()) {
             return;
@@ -989,7 +1219,10 @@ export default function SuwaSethaHealthcareAssistant() {
             const res = await fetch("/api/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ message: userMessage }),
+                body: JSON.stringify({
+                    message: userMessage,
+                    language: selectedLanguage,
+                }),
             });
             const data = await res.json();
 
@@ -1153,7 +1386,7 @@ export default function SuwaSethaHealthcareAssistant() {
 
         try {
             const res = await fetch(
-                `/api/medical-search?query=${encodeURIComponent(medicalQuery.trim())}`,
+                `/api/medical-search?query=${encodeURIComponent(medicalQuery.trim())}&language=${selectedLanguage}`,
                 { cache: "no-store" }
             );
             const data = await res.json();
@@ -1176,6 +1409,44 @@ export default function SuwaSethaHealthcareAssistant() {
             setMedicalDisclaimer("");
         } finally {
             setMedicalLookupLoading(false);
+        }
+    };
+
+    const generateAppointmentSummary = async (appointmentId: string) => {
+        setSummaryGeneratingId(appointmentId);
+
+        try {
+            const res = await fetch(`/api/appointments/${appointmentId}/summary`, {
+                method: "POST",
+                credentials: "include",
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                throw new Error(data.error || "Failed to generate AI summary.");
+            }
+
+            setAppointments((current) =>
+                current.map((item) =>
+                    item.id === appointmentId ? data.appointment : item
+                )
+            );
+            setPatientAppointments((current) =>
+                current.map((item) =>
+                    item.id === appointmentId ? data.appointment : item
+                )
+            );
+            setSelectedAdminAppointment((current) =>
+                current?.id === appointmentId ? data.appointment : current
+            );
+        } catch (error) {
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Failed to generate AI summary.";
+            setAppointmentsError(message);
+        } finally {
+            setSummaryGeneratingId(null);
         }
     };
 
@@ -1270,6 +1541,42 @@ export default function SuwaSethaHealthcareAssistant() {
         }
     };
 
+    const loadAssignmentDefaults = React.useEffectEvent(
+        async (appointmentId: string) => {
+            setAssignmentDefaultsLoading(true);
+            setAssignmentDefaultsError("");
+
+            try {
+                const res = await fetch(
+                    `/api/appointments/${appointmentId}/assignment-defaults`,
+                    {
+                        credentials: "include",
+                        cache: "no-store",
+                    }
+                );
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(
+                        data.error || "Failed to prepare assignment defaults."
+                    );
+                }
+
+                if (data.defaults) {
+                    applyAssignmentDefaults(data.defaults);
+                }
+            } catch (error) {
+                setAssignmentDefaultsError(
+                    error instanceof Error
+                        ? error.message
+                        : "Failed to prepare assignment defaults."
+                );
+            } finally {
+                setAssignmentDefaultsLoading(false);
+            }
+        }
+    );
+
     const openAdminDialog = (item: Appointment) => {
         setSelectedAdminAppointment(item);
         setAdminAssignmentForm({
@@ -1290,7 +1597,13 @@ export default function SuwaSethaHealthcareAssistant() {
             followUpDate: item.follow_up_date ?? "",
             publicPatientNotes: item.public_patient_notes ?? "",
         });
+        setAssignmentDefaultsError("");
+        setAssignmentDefaultsLoading(item.status === "Pending");
         setAdminDialogOpen(true);
+
+        if (item.status === "Pending") {
+            void loadAssignmentDefaults(item.id);
+        }
     };
 
     const submitAdminApproval = async () => {
@@ -1785,6 +2098,109 @@ export default function SuwaSethaHealthcareAssistant() {
                         </DialogDescription>
                     </DialogHeader>
                     <div className="grid gap-4 px-6 pb-6 md:grid-cols-2">
+                        {selectedAdminAppointment ? (
+                            <div className="rounded-3xl bg-slate-50 p-4 ring-1 ring-slate-100 md:col-span-2">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                            AI Summary
+                                        </p>
+                                        <p className="mt-2 text-sm leading-7 text-slate-700">
+                                            {selectedAdminAppointment.ai_patient_summary ||
+                                                buildAiPatientSummary(
+                                                    selectedAdminAppointment
+                                                )}
+                                        </p>
+                                        <p className="mt-3 text-xs leading-6 text-slate-500">
+                                            Auto-generated based on department, doctor
+                                            schedule, and today&apos;s queue.
+                                        </p>
+                                    </div>
+                                    <div className="flex flex-col gap-2">
+                                        {selectedAdminAppointment.status === "Pending" ? (
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="rounded-2xl"
+                                                disabled={assignmentDefaultsLoading}
+                                                onClick={() =>
+                                                    void loadAssignmentDefaults(
+                                                        selectedAdminAppointment.id
+                                                    )
+                                                }
+                                            >
+                                                {assignmentDefaultsLoading ? (
+                                                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                                                ) : null}
+                                                Regenerate defaults
+                                            </Button>
+                                        ) : null}
+                                        {!selectedAdminAppointment.ai_patient_summary ? (
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="rounded-2xl"
+                                                disabled={
+                                                    summaryGeneratingId ===
+                                                    selectedAdminAppointment.id
+                                                }
+                                                onClick={() =>
+                                                    void generateAppointmentSummary(
+                                                        selectedAdminAppointment.id
+                                                    )
+                                                }
+                                            >
+                                                {summaryGeneratingId ===
+                                                selectedAdminAppointment.id ? (
+                                                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                                                ) : null}
+                                                Generate AI Summary
+                                            </Button>
+                                        ) : null}
+                                    </div>
+                                </div>
+                                {staffQueuePredictions[selectedAdminAppointment.id] ? (
+                                    <div className="mt-4 rounded-3xl bg-white p-4 ring-1 ring-slate-200">
+                                        <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                            Estimated Queue Time
+                                        </p>
+                                        <p className="mt-2 font-semibold text-slate-900">
+                                            {
+                                                staffQueuePredictions[
+                                                    selectedAdminAppointment.id
+                                                ].label
+                                            }
+                                        </p>
+                                        <p className="mt-2 text-sm leading-6 text-slate-700">
+                                            {
+                                                staffQueuePredictions[
+                                                    selectedAdminAppointment.id
+                                                ].explanation
+                                            }
+                                        </p>
+                                        <p className="mt-2 text-xs leading-6 text-slate-500">
+                                            {
+                                                staffQueuePredictions[
+                                                    selectedAdminAppointment.id
+                                                ].disclaimer
+                                            }
+                                        </p>
+                                    </div>
+                                ) : null}
+                            </div>
+                        ) : null}
+                        {assignmentDefaultsLoading ? (
+                            <div className="flex items-center gap-2 rounded-3xl bg-sky-50 px-4 py-3 text-sm text-sky-700 ring-1 ring-sky-100 md:col-span-2">
+                                <LoaderCircle className="h-4 w-4 animate-spin" />
+                                Preparing assignment defaults...
+                            </div>
+                        ) : null}
+                        {assignmentDefaultsError ? (
+                            <div className="rounded-3xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 ring-1 ring-amber-100 md:col-span-2">
+                                {assignmentDefaultsError} You can still adjust the fields
+                                manually.
+                            </div>
+                        ) : null}
                         <select
                             value={adminAssignmentForm.status}
                             onChange={(event) =>
@@ -2012,6 +2428,40 @@ export default function SuwaSethaHealthcareAssistant() {
                                                 title="AI Assistant"
                                                 description="Describe symptoms in simple language. The assistant responds safely, suggests a department and consultant, and adds trusted medical education cards when available."
                                             />
+
+                                            <div className="mt-5 flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-100">
+                                                <div>
+                                                    <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                                        Language
+                                                    </p>
+                                                    <p className="mt-1 text-sm text-slate-600">
+                                                        Chat and AI education responses follow your selected language.
+                                                    </p>
+                                                </div>
+                                                <select
+                                                    value={selectedLanguage}
+                                                    onChange={(event) =>
+                                                        handleLanguageChange(
+                                                            resolveLanguage(
+                                                                event.target.value
+                                                            )
+                                                        )
+                                                    }
+                                                    className="rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none"
+                                                >
+                                                    {(
+                                                        Object.entries(
+                                                            LANGUAGE_LABELS
+                                                        ) as Array<
+                                                            [AppLanguage, string]
+                                                        >
+                                                    ).map(([value, label]) => (
+                                                        <option key={value} value={value}>
+                                                            {label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
 
                                             <div className="mt-6 h-[420px] space-y-4 overflow-y-auto rounded-[1.5rem] border border-slate-200 bg-slate-50/80 p-4 sm:p-5">
                                                 {messages.map((message, index) => {
@@ -2428,6 +2878,38 @@ export default function SuwaSethaHealthcareAssistant() {
                                             description="Track appointment numbers, clinic details, live queue updates, follow-up dates, and visible patient notes once staff approve your request."
                                         />
 
+                                        <div className="mt-5 flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-100">
+                                            <div>
+                                                <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                                    Language
+                                                </p>
+                                                <p className="mt-1 text-sm text-slate-600">
+                                                    Patient-facing AI responses stay in your selected language.
+                                                </p>
+                                            </div>
+                                            <select
+                                                value={selectedLanguage}
+                                                onChange={(event) =>
+                                                    handleLanguageChange(
+                                                        resolveLanguage(
+                                                            event.target.value
+                                                        )
+                                                    )
+                                                }
+                                                className="rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none"
+                                            >
+                                                {(
+                                                    Object.entries(
+                                                        LANGUAGE_LABELS
+                                                    ) as Array<[AppLanguage, string]>
+                                                ).map(([value, label]) => (
+                                                    <option key={value} value={value}>
+                                                        {label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+
                                         {patientAppointmentsError ? (
                                             <p className="mt-4 text-sm text-rose-600">
                                                 {patientAppointmentsError}
@@ -2555,6 +3037,37 @@ export default function SuwaSethaHealthcareAssistant() {
                                                                             </p>
                                                                         </div>
                                                                     </div>
+                                                                </div>
+                                                            ) : null}
+
+                                                            {patientQueuePredictions[
+                                                                item.id
+                                                            ] ? (
+                                                                <div className="mt-4 rounded-3xl bg-sky-50 p-4 ring-1 ring-sky-100">
+                                                                    <p className="text-xs uppercase tracking-[0.24em] text-sky-700">
+                                                                        Estimated Queue Time
+                                                                    </p>
+                                                                    <p className="mt-2 font-semibold text-slate-900">
+                                                                        {
+                                                                            patientQueuePredictions[
+                                                                                item.id
+                                                                            ].label
+                                                                        }
+                                                                    </p>
+                                                                    <p className="mt-2 text-sm leading-6 text-slate-700">
+                                                                        {
+                                                                            patientQueuePredictions[
+                                                                                item.id
+                                                                            ].explanation
+                                                                        }
+                                                                    </p>
+                                                                    <p className="mt-2 text-xs leading-6 text-slate-500">
+                                                                        {
+                                                                            patientQueuePredictions[
+                                                                                item.id
+                                                                            ].disclaimer
+                                                                        }
+                                                                    </p>
                                                                 </div>
                                                             ) : null}
 
@@ -2880,12 +3393,72 @@ export default function SuwaSethaHealthcareAssistant() {
 
                                                         <div className="mt-5 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
                                                             <div className="rounded-3xl bg-white p-4 ring-1 ring-slate-200">
-                                                                <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
-                                                                    AI patient summary
-                                                                </p>
-                                                                <p className="mt-3 text-sm leading-7 text-slate-700">
-                                                                    {buildAiPatientSummary(item)}
-                                                                </p>
+                                                                <div className="flex items-start justify-between gap-3">
+                                                                    <div>
+                                                                        <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                                                            AI Summary
+                                                                        </p>
+                                                                        <p className="mt-3 text-sm leading-7 text-slate-700">
+                                                                            {item.ai_patient_summary ||
+                                                                                buildAiPatientSummary(
+                                                                                    item
+                                                                                )}
+                                                                        </p>
+                                                                    </div>
+                                                                    {!item.ai_patient_summary ? (
+                                                                        <Button
+                                                                            size="sm"
+                                                                            variant="outline"
+                                                                            className="rounded-full"
+                                                                            disabled={
+                                                                                summaryGeneratingId ===
+                                                                                item.id
+                                                                            }
+                                                                            onClick={() =>
+                                                                                void generateAppointmentSummary(
+                                                                                    item.id
+                                                                                )
+                                                                            }
+                                                                        >
+                                                                            {summaryGeneratingId ===
+                                                                            item.id ? (
+                                                                                <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                                                                            ) : null}
+                                                                            Generate AI Summary
+                                                                        </Button>
+                                                                    ) : null}
+                                                                </div>
+                                                                {staffQueuePredictions[item.id] ? (
+                                                                    <div className="mt-4 rounded-3xl bg-sky-50 p-4 ring-1 ring-sky-100">
+                                                                        <p className="text-xs uppercase tracking-[0.24em] text-sky-700">
+                                                                            Estimated Queue Time
+                                                                        </p>
+                                                                        <p className="mt-2 font-semibold text-slate-900">
+                                                                            {
+                                                                                staffQueuePredictions[
+                                                                                    item.id
+                                                                                ]
+                                                                                    .label
+                                                                            }
+                                                                        </p>
+                                                                        <p className="mt-2 text-sm leading-6 text-slate-700">
+                                                                            {
+                                                                                staffQueuePredictions[
+                                                                                    item.id
+                                                                                ]
+                                                                                    .explanation
+                                                                            }
+                                                                        </p>
+                                                                        <p className="mt-2 text-xs leading-6 text-slate-500">
+                                                                            {
+                                                                                staffQueuePredictions[
+                                                                                    item.id
+                                                                                ]
+                                                                                    .disclaimer
+                                                                            }
+                                                                        </p>
+                                                                    </div>
+                                                                ) : null}
                                                             </div>
 
                                                             <div className="grid gap-4">
@@ -3054,6 +3627,66 @@ export default function SuwaSethaHealthcareAssistant() {
                                                 {emergencyError}
                                             </p>
                                         ) : null}
+
+                                        <div className="mt-6 rounded-[1.75rem] border border-slate-200 bg-slate-50/60 p-5">
+                                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                                <div>
+                                                    <h3 className="font-semibold text-slate-950">
+                                                        AI Admin Insights
+                                                    </h3>
+                                                    <p className="mt-1 text-sm text-slate-500">
+                                                        Operational summaries based on recent appointments, emergency requests, and assistant activity.
+                                                    </p>
+                                                </div>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    className="rounded-2xl"
+                                                    disabled={adminInsightsLoading}
+                                                    onClick={() =>
+                                                        void loadAdminInsights()
+                                                    }
+                                                >
+                                                    {adminInsightsLoading ? (
+                                                        <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                                                    ) : null}
+                                                    Refresh
+                                                </Button>
+                                            </div>
+                                            {adminInsightsError ? (
+                                                <p className="mt-4 text-sm text-rose-600">
+                                                    {adminInsightsError}
+                                                </p>
+                                            ) : null}
+                                            <div className="mt-4 grid gap-4 lg:grid-cols-3">
+                                                {adminInsightsLoading &&
+                                                !adminInsights.length ? (
+                                                    <div className="col-span-full flex items-center gap-2 text-sm text-slate-500">
+                                                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                                                        Generating operational insights...
+                                                    </div>
+                                                ) : adminInsights.length ? (
+                                                    adminInsights.map((card) => (
+                                                        <div
+                                                            key={card.title}
+                                                            className="rounded-3xl bg-white p-4 ring-1 ring-slate-200"
+                                                        >
+                                                            <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                                                                {card.title}
+                                                            </p>
+                                                            <p className="mt-3 text-sm leading-7 text-slate-700">
+                                                                {card.content}
+                                                            </p>
+                                                        </div>
+                                                    ))
+                                                ) : (
+                                                    <EmptyState
+                                                        title="No AI insights yet"
+                                                        description="Refresh after appointment, emergency, or assistant activity is available."
+                                                    />
+                                                )}
+                                            </div>
+                                        </div>
 
                                         <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_0.95fr]">
                                             <div className="space-y-6">
@@ -3304,6 +3937,18 @@ export default function SuwaSethaHealthcareAssistant() {
                                                                                 item.appointment_date
                                                                             )}
                                                                         </p>
+                                                                        {staffQueuePredictions[
+                                                                            item.id
+                                                                        ] ? (
+                                                                            <p className="mt-1 text-xs text-sky-700">
+                                                                                {
+                                                                                    staffQueuePredictions[
+                                                                                        item.id
+                                                                                    ]
+                                                                                        .label
+                                                                                }
+                                                                            </p>
+                                                                        ) : null}
                                                                     </div>
                                                                     <Button
                                                                         size="sm"

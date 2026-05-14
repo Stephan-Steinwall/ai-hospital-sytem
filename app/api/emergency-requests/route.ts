@@ -48,8 +48,27 @@ export async function POST(req: Request) {
         );
     }
 
-    const { data, error } = await admin
-        .from("emergency_requests")
+    const emergencyRequestsTable = admin.from(
+        "emergency_requests"
+    ) as unknown as {
+        insert: (value: {
+            patient_name: string | null;
+            phone: string | null;
+            latitude: number;
+            longitude: number;
+            notes: string | null;
+            status: string;
+        }) => {
+            select: (query: string) => {
+                single: () => Promise<{
+                    data: unknown;
+                    error: { message: string } | null;
+                }>;
+            };
+        };
+    };
+
+    const { data, error } = await emergencyRequestsTable
         .insert({
             patient_name: patientName || null,
             phone: phone || null,

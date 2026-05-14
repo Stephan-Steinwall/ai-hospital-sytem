@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { AppLanguage } from "@/lib/languages";
 import type { MedicalSearchItem } from "@/types";
 
 const MEDLINE_BASE_URL = "https://wsearch.nlm.nih.gov/ws/query";
@@ -131,7 +132,8 @@ export async function lookupTrustedMedicalInfo(query: string) {
 
 export async function summarizeTrustedMedicalInfo(
     query: string,
-    results: MedicalSearchItem[]
+    results: MedicalSearchItem[],
+    language: AppLanguage = "en"
 ) {
     if (!results.length || !process.env.OPENAI_API_KEY) {
         return null;
@@ -148,7 +150,13 @@ export async function summarizeTrustedMedicalInfo(
             {
                 role: "system",
                 content:
-                    "You summarize trusted medical education sources for patients. Do not diagnose, do not prescribe, do not claim certainty, and keep the response educational and short.",
+                    `You summarize trusted medical education sources for patients in ${
+                        language === "si"
+                            ? "Sinhala"
+                            : language === "ta"
+                              ? "Tamil"
+                              : "English"
+                    }. Do not diagnose, do not prescribe, do not claim certainty, and keep the response educational and short.`,
             },
             {
                 role: "user",
@@ -162,7 +170,7 @@ ${results
     )
     .join("\n")}
 
-Write a 2-3 sentence educational summary. Include a reminder that this is not a medical diagnosis.`,
+Write a 2-3 sentence educational summary in the requested language. Include a reminder that this is not a medical diagnosis.`,
             },
         ],
     });

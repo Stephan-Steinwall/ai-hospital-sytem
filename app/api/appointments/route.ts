@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { generatePatientSummary } from "@/lib/ai-features";
 import { getSupabaseAdminClient } from "@/lib/supabase-admin";
 import {
     createSupabaseServerClient,
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
     const body = await req.json();
 
     const { name, phone, date, department, symptoms, urgency } = body;
+    const resolvedUrgency = urgency || "Medium";
 
     if (!name || !phone || !date || !department) {
         return NextResponse.json(
@@ -55,18 +57,47 @@ export async function POST(req: Request) {
         );
     }
 
-    const { data, error } = await admin
-        .from("appointments")
+    const aiPatientSummary = await generatePatientSummary({
+        symptoms: typeof symptoms === "string" ? symptoms : null,
+        urgency: resolvedUrgency,
+        department,
+        appointmentDate: date,
+    });
+
+    const appointmentsTable = admin.from("appointments") as unknown as {
+        insert: (value: {
+            patient_name: string;
+            phone: string;
+            appointment_date: string;
+            department: string;
+            symptoms: string | null;
+            urgency: string;
+            status: string;
+            patient_user_id: string | null;
+            patient_email: string | null;
+            ai_patient_summary: string;
+        }) => {
+            select: () => {
+                single: () => Promise<{
+                    data: unknown;
+                    error: { message: string } | null;
+                }>;
+            };
+        };
+    };
+
+    const { data, error } = await appointmentsTable
         .insert({
             patient_name: name,
             phone,
             appointment_date: date,
             department,
             symptoms: symptoms || null,
-            urgency: urgency || "Medium",
+            urgency: resolvedUrgency,
             status: "Pending",
             patient_user_id: user?.id ?? null,
             patient_email: user?.email ?? body.patientEmail ?? null,
+            ai_patient_summary: aiPatientSummary,
         })
         .select()
         .single();

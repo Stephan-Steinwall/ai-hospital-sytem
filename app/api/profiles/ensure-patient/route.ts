@@ -4,7 +4,6 @@ import { getSupabaseAdminClient } from "@/lib/supabase-admin";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
 
 export async function POST() {
-    // Verify the caller is authenticated using the cookie-based server client.
     const supabase = await createSupabaseServerClient();
     const {
         data: { user },
@@ -18,25 +17,40 @@ export async function POST() {
         );
     }
 
-    // Use the admin (service-role) client to bypass RLS.
     const admin = getSupabaseAdminClient();
 
     if (!admin) {
         return NextResponse.json(
-            { error: "Server configuration error: SUPABASE_SERVICE_ROLE_KEY is missing." },
+            { error: "Missing SUPABASE_SERVICE_ROLE_KEY in .env.local" },
             { status: 500 }
         );
     }
 
-    // Check whether the profile row already exists.
-    const { data: existing, error: selectError } = await admin
-        .from("profiles")
+    const profilesTable = admin.from("profiles") as unknown as {
+        select: (query: string) => {
+            eq: (column: string, value: string) => {
+                maybeSingle: () => Promise<{
+                    data: { role: unknown } | null;
+                    error: { message: string } | null;
+                }>;
+            };
+        };
+        insert: (value: { id: string; role: "patient" }) => {
+            select: (query: string) => {
+                single: () => Promise<{
+                    data: { role: unknown } | null;
+                    error: { message: string } | null;
+                }>;
+            };
+        };
+    };
+
+    const { data: existing, error: selectError } = await profilesTable
         .select("role")
         .eq("id", user.id)
         .maybeSingle();
 
     if (selectError) {
-        console.error("[ensure-patient] select error:", selectError);
         return NextResponse.json({ error: selectError.message }, { status: 500 });
     }
 
@@ -47,31 +61,24 @@ export async function POST() {
             return NextResponse.json({ role, created: false });
         }
 
-        // Profile exists but role is invalid — return it anyway so the client
-        // can surface a meaningful message rather than getting a non-OK status.
         return NextResponse.json(
-            { error: "Profile exists but role is not recognized.", role: existing.role },
+            { error: "Profile exists but role is not recognized." },
             { status: 409 }
         );
     }
 
-    // Profile row is missing — insert a default patient profile.
-    const { data: inserted, error: insertError } = await admin
-        .from("profiles")
+    const { data: inserted, error: insertError } = await profilesTable
         .insert({ id: user.id, role: "patient" })
         .select("role")
         .single();
 
     if (insertError) {
-        // A concurrent request may have inserted the row already (race). Retry.
-        const { data: raceProfile, error: raceError } = await admin
-            .from("profiles")
+        const { data: raceProfile, error: raceError } = await profilesTable
             .select("role")
             .eq("id", user.id)
             .maybeSingle();
 
         if (raceError) {
-            console.error("[ensure-patient] race-check error:", raceError);
             return NextResponse.json({ error: raceError.message }, { status: 500 });
         }
 
@@ -80,7 +87,6 @@ export async function POST() {
             return NextResponse.json({ role, created: false });
         }
 
-        console.error("[ensure-patient] insert error:", insertError);
         return NextResponse.json({ error: insertError.message }, { status: 500 });
     }
 

@@ -36,6 +36,7 @@ export interface Appointment {
     completed_at?: string | null;
     feedback_rating?: number | null;
     feedback_comment?: string | null;
+    ai_patient_summary?: string | null;
 }
 
 export interface MedicalSearchItem {
@@ -63,4 +64,27 @@ export interface EmergencyRequest {
     notes: string | null;
     status: "Requested" | "Dispatched" | "Resolved" | "Cancelled";
     created_at: string;
+}
+
+export interface QueuePrediction {
+    appointmentId: string;
+    label: string;
+    explanation: string;
+    disclaimer: string;
+    estimatedMinutes: number | null;
+    remainingPatients: number | null;
+}
+
+export interface AdminInsightCard {
+    title: "Key Insight" | "Risk/Concern" | "Suggested Action";
+    content: string;
+}
+
+export interface AppointmentAssignmentDefaults {
+    assignedDoctor: string;
+    roomNumber: string;
+    appointmentNumber: string;
+    queueNumber: number;
+    currentQueueNumber: number;
+    appointmentTime: string;
 }

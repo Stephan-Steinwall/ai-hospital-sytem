@@ -48,21 +48,36 @@ export async function getUserContext() {
 
     const { role, error, profileMissing } = await loadUserRole(supabase, user);
 
-    // Happy path: role is known from the profiles table.
     if (role) {
         return { supabase, user, role };
     }
 
-    // If the anon-key profiles query failed or the row is missing, fall back to
-    // the admin (service-role) client which bypasses RLS entirely.
     if (error || profileMissing) {
         try {
             const { getSupabaseAdminClient } = await import("@/lib/supabase-admin");
             const admin = getSupabaseAdminClient();
 
             if (admin) {
-                const { data: adminProfile } = await admin
-                    .from("profiles")
+                const profilesTable = admin.from("profiles") as unknown as {
+                    select: (query: string) => {
+                        eq: (column: string, value: string) => {
+                            maybeSingle: () => Promise<{
+                                data: { role: unknown } | null;
+                                error: { message: string } | null;
+                            }>;
+                        };
+                    };
+                    insert: (value: { id: string; role: "patient" }) => {
+                        select: (query: string) => {
+                            single: () => Promise<{
+                                data: { role: unknown } | null;
+                                error: { message: string } | null;
+                            }>;
+                        };
+                    };
+                };
+
+                const { data: adminProfile } = await profilesTable
                     .select("role")
                     .eq("id", user.id)
                     .maybeSingle();
@@ -73,10 +88,8 @@ export async function getUserContext() {
                     return { supabase, user, role: adminRole };
                 }
 
-                // Profile row is completely missing — create a default patient row.
                 if (!adminProfile) {
-                    await admin
-                        .from("profiles")
+                    await profilesTable
                         .insert({ id: user.id, role: "patient" })
                         .select("role")
                         .single();
@@ -85,8 +98,7 @@ export async function getUserContext() {
                 }
             }
         } catch {
-            // Admin fallback failed — return null role so route handlers can
-            // decide whether to reject or serve a degraded response.
+            // Admin fallback failed; route handlers can decide whether to reject.
         }
     }
 
