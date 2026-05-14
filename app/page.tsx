@@ -344,13 +344,6 @@ function buildAiPatientSummary(item: Appointment) {
     return `AI-organised summary: ${symptomText} Requested department: ${item.department}. Current urgency: ${item.urgency}. Current status: ${item.status}.`;
 }
 
-function getStoredLanguage() {
-    if (typeof window === "undefined") {
-        return "en" as AppLanguage;
-    }
-
-    return resolveLanguage(window.localStorage.getItem("suwa-language"));
-}
 
 function getStatusTone(status: Appointment["status"]) {
     if (status === "Approved") {
@@ -408,13 +401,14 @@ export default function SuwaSethaHealthcareAssistant() {
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [emergencyDialogOpen, setEmergencyDialogOpen] = useState(false);
     const [symptomText, setSymptomText] = useState("");
-    const [selectedLanguage, setSelectedLanguage] = useState<AppLanguage>(() =>
-        getStoredLanguage()
-    );
+    // Always start with "en" — localStorage is not available during SSR.
+    // A useEffect below reads the stored value after mount and updates state
+    // if a different language was previously chosen.
+    const [selectedLanguage, setSelectedLanguage] = useState<AppLanguage>("en");
     const [messages, setMessages] = useState<Message[]>([
         {
             role: "assistant",
-            text: getAssistantIntro(getStoredLanguage()),
+            text: getAssistantIntro("en"),
         },
     ]);
     const [recommendation, setRecommendation] = useState<{
@@ -718,7 +712,40 @@ export default function SuwaSethaHealthcareAssistant() {
         routeToRoleHome(role);
     });
 
+    // Hydration-safe language persistence:
+    // On first mount, read localStorage and patch state if a non-default language
+    // was previously stored. On subsequent changes, write the new value back.
+    const isMountedLanguageRef = React.useRef(false);
+
     useEffect(() => {
+        if (!isMountedLanguageRef.current) {
+            // First run (mount): read stored preference and apply it.
+            isMountedLanguageRef.current = true;
+            const stored = resolveLanguage(
+                typeof window !== "undefined"
+                    ? window.localStorage.getItem("suwa-language")
+                    : null
+            );
+
+            if (stored !== "en") {
+                setSelectedLanguage(stored);
+                setMessages((current) => {
+                    if (
+                        current.length === 1 &&
+                        current[0]?.role === "assistant" &&
+                        !current[0]?.context
+                    ) {
+                        return [{ role: "assistant", text: getAssistantIntro(stored) }];
+                    }
+
+                    return current;
+                });
+            }
+
+            return;
+        }
+
+        // Subsequent runs: persist the newly-chosen language.
         if (typeof window !== "undefined") {
             window.localStorage.setItem("suwa-language", selectedLanguage);
         }
@@ -1951,6 +1978,33 @@ export default function SuwaSethaHealthcareAssistant() {
                             </div>
                         ) : null}
 
+                        {/* Language toggle — desktop */}
+                        <div
+                            className="hidden items-center rounded-full border border-slate-200 bg-white p-1 shadow-sm lg:flex"
+                            role="group"
+                            aria-label="Select language"
+                        >
+                            {(Object.entries(LANGUAGE_LABELS) as Array<[AppLanguage, string]>).map(
+                                ([code, label]) => (
+                                    <button
+                                        key={code}
+                                        type="button"
+                                        onClick={() => handleLanguageChange(code)}
+                                        className={[
+                                            "min-h-8 rounded-full px-3 text-xs font-semibold transition-all",
+                                            selectedLanguage === code
+                                                ? "bg-slate-950 text-white shadow"
+                                                : "text-slate-500 hover:text-slate-800",
+                                        ].join(" ")}
+                                        aria-pressed={selectedLanguage === code}
+                                        title={label}
+                                    >
+                                        {code === "en" ? "EN" : code === "si" ? "සිං" : "தமி"}
+                                    </button>
+                                )
+                            )}
+                        </div>
+
                         <Button
                             type="button"
                             variant="outline"
@@ -2019,6 +2073,40 @@ export default function SuwaSethaHealthcareAssistant() {
                                 {item.label}
                             </Button>
                         ))}
+
+                        {/* Language toggle — mobile */}
+                        <div className="mt-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                            <p className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-400">
+                                Language
+                            </p>
+                            <div
+                                className="flex gap-2"
+                                role="group"
+                                aria-label="Select language"
+                            >
+                                {(Object.entries(LANGUAGE_LABELS) as Array<[AppLanguage, string]>).map(
+                                    ([code, label]) => (
+                                        <button
+                                            key={code}
+                                            type="button"
+                                            onClick={() => {
+                                                handleLanguageChange(code);
+                                                setMobileNavOpen(false);
+                                            }}
+                                            className={[
+                                                "flex-1 rounded-xl py-2 text-sm font-semibold transition-all",
+                                                selectedLanguage === code
+                                                    ? "bg-slate-950 text-white shadow"
+                                                    : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300",
+                                            ].join(" ")}
+                                            aria-pressed={selectedLanguage === code}
+                                        >
+                                            {label}
+                                        </button>
+                                    )
+                                )}
+                            </div>
+                        </div>
                     </nav>
                 </DialogContent>
             </Dialog>

@@ -112,17 +112,7 @@ export async function POST(req: Request) {
 
         const admin = getSupabaseAdminClient();
         if (admin) {
-            const chatLogsTable = admin.from("chat_logs") as unknown as {
-                insert: (value: {
-                    user_message: string;
-                    assistant_reply: string;
-                    urgency: string;
-                    suggested_department: string;
-                }) => Promise<{
-                    error: { message: string } | null;
-                }>;
-            };
-            const { error: chatLogError } = await chatLogsTable.insert({
+            const { error: chatLogError } = await admin.from("chat_logs").insert({
                 user_message: message,
                 assistant_reply: localizedResponse.reply,
                 urgency: urgent ? "High" : "Medium",
